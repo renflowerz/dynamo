@@ -66,6 +66,11 @@ pub struct SelectRequest {
     pub model_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_id: Option<String>,
+    /// Booking key for the reservation. The EPP mints a fresh UUID per pick and
+    /// tracks `request_id -> reservation_id` so the later `free_reservation`
+    /// call can release it. If `None`, the selector generates one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reservation_id: Option<String>,
     pub token_ids: Vec<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_worker_ids: Option<HashSet<u64>>,
@@ -93,6 +98,10 @@ pub struct OverlapSummary {
 pub struct SelectResponse {
     #[serde(default)]
     pub selection_id: Option<String>,
+    /// The booking key the selector recorded (echoes the request's
+    /// `reservation_id`, or the selector-generated one when it was omitted).
+    #[serde(default)]
+    pub reservation_id: Option<String>,
     pub worker_id: u64,
     pub dp_rank: u32,
     pub endpoint: String,
@@ -242,7 +251,7 @@ impl Selector {
             model_name: req.model_name.clone(),
             tenant_id: DEFAULT_TENANT.to_string(),
             selection_id: req.selection_id.clone(),
-            reservation_id: None,
+            reservation_id: req.reservation_id.clone(),
             prompt: PromptRequest {
                 token_ids: Some(req.token_ids.clone()),
                 ..Default::default()
@@ -263,6 +272,7 @@ impl Selector {
             .map_err(|e| anyhow!("select_and_reserve failed: {e}"))?;
         Ok(SelectResponse {
             selection_id: resp.selection_id,
+            reservation_id: resp.reservation_id,
             worker_id: resp.worker_id,
             dp_rank: resp.dp_rank,
             endpoint: resp.endpoint,
@@ -275,6 +285,33 @@ impl Selector {
             },
             effective_prefill_tokens: resp.effective_prefill_tokens,
         })
+    }
+
+    /// Release a booking, removing the request from the selector's slot tracker /
+    /// active-load accounting. Called when the gateway signals the response is
+    /// complete. Idempotent: an unknown reservation (e.g. a body-less request
+    /// that never booked) is treated as success.
+    pub async fn free_reservation(&self, reservation_id: &str) -> Result<()> {
+        match self.service.free_reservation(reservation_id).await {
+            Ok(()) | Err(SelectionError::NotFound(_)) => Ok(()),
+            Err(e) => Err(anyhow!("free_reservation failed: {e}")),
+        }
+    }
+
+    /// Release *prefill* tokens for a booking from a decode worker's load, called
+    /// when the first token is generated.
+    ///
+    /// Meaningful only for **disaggregated** serving, where prefill and decode
+    /// run on different workers. In **aggregated** serving (the only mode today)
+    /// prefill and decode share one worker, so there is nothing to release and
+    /// the EPP does not call this — see
+    /// [`crate::epp_router::EppRouter::on_prefill_complete`]. Implemented now so
+    /// the disaggregated path is ready when it lands.
+    pub async fn prefill_complete(&self, reservation_id: &str) -> Result<()> {
+        match self.service.prefill_complete(reservation_id).await {
+            Ok(()) | Err(SelectionError::NotFound(_)) => Ok(()),
+            Err(e) => Err(anyhow!("prefill_complete failed: {e}")),
+        }
     }
 
     /// Returns `true` once the selector can schedule at least one worker.
@@ -326,6 +363,7 @@ mod tests {
         let req = SelectRequest {
             model_name: "Qwen/Qwen3-0.6B".to_string(),
             selection_id: Some("sel-1".to_string()),
+            reservation_id: Some("resv-1".to_string()),
             token_ids: vec![1, 2, 3],
             allowed_worker_ids: None,
             priority_jump: None,
@@ -334,6 +372,7 @@ mod tests {
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["token_ids"], serde_json::json!([1, 2, 3]));
         assert_eq!(v["selection_id"], "sel-1");
+        assert_eq!(v["reservation_id"], "resv-1");
         assert!(v.get("allowed_worker_ids").is_none());
     }
 
