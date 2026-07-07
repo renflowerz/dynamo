@@ -33,7 +33,10 @@ from dynamo.profiler.utils.config import (
     update_image,
 )
 from dynamo.profiler.utils.defaults import EngineType
-from dynamo.profiler.utils.model_info import model_has_auto_map
+from dynamo.profiler.utils.model_info import (
+    model_has_auto_map,
+    model_ref_allows_implicit_trust_remote_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -874,6 +877,11 @@ def auto_inject_trust_remote_code(
     (same exclusion list as ``apply_dgd_overrides``). Returns the list of
     service names that were modified.
 
+    Security policy: implicit injection is allowed only for model refs that
+    resolve to local directories (including PVC-backed snapshots). Mutable
+    remote refs fail closed and must opt in explicitly by already carrying
+    ``--trust-remote-code`` via user overrides.
+
     Per-service model detection: if a worker's ``mainContainer.args`` contains
     ``--model <path>`` or ``--model-path <path>`` (including ``=`` forms),
     that path overrides the *model_name_or_path* fallback for that service's
@@ -951,6 +959,13 @@ def auto_inject_trust_remote_code(
 
         if not model_has_auto_map(effective_model, token=hf_token):
             continue
+
+        if not model_ref_allows_implicit_trust_remote_code(effective_model):
+            raise RuntimeError(
+                "Refusing to auto-inject --trust-remote-code for mutable remote "
+                f"model ref {effective_model!r}. Set --trust-remote-code "
+                "explicitly if this ref is intended."
+            )
 
         # Inject the flag, preserving the shell-form shape when necessary.
         if is_shell_c and is_single_string_args:
