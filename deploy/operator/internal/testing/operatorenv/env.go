@@ -417,7 +417,9 @@ func defaultOperatorConfig(in *configv1alpha1.OperatorConfiguration) *configv1al
 	cfg.Server.Metrics.BindAddress = "0"
 	cfg.Server.HealthProbe.BindAddress = "0"
 	cfg.Server.Webhook.CertProvisionMode = configv1alpha1.CertProvisionModeManual
-	cfg.GPU.DiscoveryEnabled = ptr.To(false)
+	if in == nil || in.GPU.DiscoveryEnabled == nil {
+		cfg.GPU.DiscoveryEnabled = ptr.To(false)
+	}
 	return cfg
 }
 

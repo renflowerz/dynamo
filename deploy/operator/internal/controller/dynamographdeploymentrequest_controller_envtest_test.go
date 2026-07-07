@@ -125,6 +125,43 @@ func TestDynamoGraphDeploymentRequestReconcilerRejectsImmutableSpecChange(t *tes
 	}
 }
 
+func TestDGDRAdmissionDefaultsPlannerImage(t *testing.T) {
+	ctx := t.Context()
+	env := sharedEnv.ForTest(t)
+
+	t.Log("Create a DGDR without spec.image through the API server")
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "default-image",
+			Namespace: env.Namespace(),
+		},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "Qwen/Qwen3-0.6B",
+			Backend: nvidiacomv1beta1.BackendTypeVllm,
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+				VRAMMB:         ptr.To(81920.0),
+				NumGPUsPerNode: ptr.To[int32](8),
+				TotalGPUs:      ptr.To[int32](8),
+			},
+		},
+	}
+	if err := env.Client().Create(ctx, dgdr); err != nil {
+		t.Fatalf("create DGDR: %v", err)
+	}
+
+	t.Log("Read back the DGDR and assert the admission webhook defaulted the planner image")
+	var got nvidiacomv1beta1.DynamoGraphDeploymentRequest
+	key := types.NamespacedName{Name: dgdr.Name, Namespace: env.Namespace()}
+	if err := env.Client().Get(ctx, key, &got); err != nil {
+		t.Fatalf("get DGDR: %v", err)
+	}
+	want := "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0"
+	if got.Spec.Image != want {
+		t.Fatalf("defaulted image = %q, want %q", got.Spec.Image, want)
+	}
+}
+
 var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 	const (
 		timeout  = time.Second * 10
