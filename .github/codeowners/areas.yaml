@@ -380,6 +380,7 @@ areas:
   - deploy/helm/charts/
   - deploy/helm/charts/platform/
   - deploy/operator/
+  - deploy/power-agent/
   - deploy/operator/api/
   - deploy/operator/api/config/
   - deploy/operator/api/scripts/

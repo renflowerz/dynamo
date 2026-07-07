@@ -42,6 +42,11 @@ const (
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
+	// KubeAnnotationGroveUpdateStrategy temporarily exposes the Grove
+	// PodCliqueSet update strategy while the long-term DGD API is settled.
+	// Supported values match Grove exactly: "RollingRecreate" and "OnDelete".
+	KubeAnnotationGroveUpdateStrategy = "nvidia.com/grove-update-strategy"
+
 	// KubeAnnotationIstioSidecarInject is the standard Istio annotation that
 	// controls whether the mutating webhook injects an istio-proxy sidecar into
 	// a pod. Setting it to "false" opts the pod out of sidecar injection even
@@ -192,6 +197,11 @@ const (
 	KaiSchedulerName                = "kai-scheduler"                  // Scheduler name for kai-scheduler
 	DefaultKaiSchedulerQueue        = "dynamo"                         // Default queue name when none specified
 
+	// Volcano scheduler related constants
+	KubeAnnotationVolcanoQueue  = "nvidia.com/volcano-queue" // User-provided annotation to specify Volcano queue name
+	GroveAnnotationVolcanoQueue = "scheduling.grove.io/volcano-queue"
+	VolcanoSchedulerName        = "volcano"
+
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
@@ -225,24 +235,6 @@ const (
 	ResourceStateReady    = "ready"
 	ResourceStateNotReady = "not_ready"
 	ResourceStateUnknown  = "unknown"
-
-	// Pod identity (Downward API) ---
-	// After CRIU restore, env vars contain stale values from the checkpoint pod.
-	// The Downward API files at /etc/podinfo always reflect the current pod.
-	PodInfoVolumeName = "podinfo"
-	PodInfoMountPath  = "/etc/podinfo"
-
-	// Downward API field paths
-	PodInfoFieldPodName      = "metadata.name"
-	PodInfoFieldPodUID       = "metadata.uid"
-	PodInfoFieldPodNamespace = "metadata.namespace"
-
-	// Downward API file names for restore identity
-	PodInfoFileDynNamespace             = "dyn_namespace"
-	PodInfoFileDynNamespaceWorkerSuffix = "dyn_namespace_worker_suffix"
-	PodInfoFileDynComponent             = "dyn_component"
-	PodInfoFileDynParentDGDName         = "dyn_parent_dgd_k8s_name"
-	PodInfoFileDynParentDGDNamespace    = "dyn_parent_dgd_k8s_namespace"
 
 	// Worker hash rolling-update annotations are controller-owned annotations on
 	// DynamoGraphDeployment. They record the active worker generation and must not

@@ -146,6 +146,8 @@ Observability:
   `telemetry.engine_trace_kwargs(context)`
 
 Request handling:
+- vLLM image and video inference in aggregated deployments. See
+  [vLLM Multimodal](../features/multimodal/multimodal-vllm.md).
 - Guided decoding — wired per-engine on the request side with
   engine-specific coverage. vLLM (`StructuredOutputsParams`) and
   TRT-LLM (`GuidedDecodingParams`) cover JSON schema / regex / grammar
@@ -166,7 +168,7 @@ Request handling:
 |---------|----------------|
 | Logprob response wire | Legacy handlers extract logprobs onto response chunks (vLLM `_extract_logprobs`, SGLang `_extract_logprobs` in `decode_handler`, TRT-LLM `_extract_logprobs` in `handler_base`); the unified `generate()` loops do not populate `log_probs` / `top_logprobs` / `cum_log_probs` on `GenerateChunk`. vLLM's `build_sampling_params` still passes `output_options.logprobs` to the engine on the unified path, so the engine computes them, but the values are dropped before they reach the chunk. SGLang and TRT-LLM unified `generate()` do not read `output_options.logprobs` at all. |
 | Text-in-text-out mode | Unified hardcodes `ModelInput.Tokens`; no engine-side tokenization or chat templating path |
-| Multimodal | Images / video / embeddings, NIXL embedding transfer, separate encode workers, `ENCODE` disaggregation role |
+| Multimodal parity | vLLM supports aggregated image and video inference. P/D multimodal execution, frontend decoding, embedding caching, separate encode workers, and SGLang/TRT-LLM execution remain unavailable through unified engines. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
@@ -252,11 +254,13 @@ the runtime wheel from a clone:
 
 ```bash
 git clone https://github.com/ai-dynamo/dynamo.git
-pip install maturin
+pip install 'maturin[patchelf]'
 cd dynamo/lib/bindings/python && maturin build --release --out /tmp/wheels
 pip install /tmp/wheels/*.whl       # ai-dynamo-runtime
 pip install /path/to/dynamo         # ai-dynamo (components/ tree)
 ```
+
+[Maturin](https://github.com/PyO3/maturin) is the Rust-Python bindings build tool. The `patchelf` extra lets maturin patch native extension library paths during the build.
 
 Building the wheel needs a Rust toolchain plus `clang`, `cmake`,
 `protobuf-compiler`, and `libssl-dev`.
@@ -495,6 +499,113 @@ async def cleanup(self) -> None:
         await self._engine.shutdown()
         self._engine = None
 ```
+
+#### Python: Metrics and Prometheus (optional)
+
+Unified backends have two metrics surfaces.
+
+Use `register_prometheus(metrics)` to bridge vendor-prefixed Prometheus
+families into the worker's `/metrics` output. The framework owns the
+`metrics` handle; do not retain it after the method returns.
+
+```python
+from dynamo.common.backend.metrics import register_global_registry
+
+async def register_prometheus(self, metrics):
+    register_global_registry(metrics, engine_prefix="vllm:")
+```
+
+Use `component_metrics_dp_ranks()` plus
+`attach_snapshot_publisher(publisher)` when the engine can push per-rank
+`ComponentSnapshot` values for `dynamo_component_*` gauges and the
+router's `kv_used_blocks` signal:
+
+```python
+from dynamo.common.backend.publisher import ComponentSnapshot
+
+def component_metrics_dp_ranks(self):
+    return [0]
+
+def attach_snapshot_publisher(self, publisher):
+    self._snapshot_publisher = publisher
+
+def _on_stats(self, used_blocks, total_blocks):
+    self._snapshot_publisher.publish(
+        0,
+        ComponentSnapshot(
+            kv_used_blocks=used_blocks,
+            kv_total_blocks=total_blocks,
+            gpu_cache_usage=used_blocks / total_blocks if total_blocks else 0.0,
+            dp_rank=0,
+        ),
+    )
+```
+
+Keep the rank list stable for the engine lifetime. `Worker` invokes
+`attach_snapshot_publisher()` only when the rank list is non-empty and
+`WorkerConfig.enable_kv_routing` is enabled. `register_prometheus()` still
+runs when `enable_kv_routing=False`.
+
+Use the in-tree backends as references: vLLM pushes snapshots from its
+stat logger and bridges `vllm:` / `lmcache:` metrics, SGLang pushes
+leader-node scheduler snapshots and bridges `sglang:` when
+`--enable-metrics` is set, and TRT-LLM pushes snapshots from its stats
+poll thread while bridging `trtllm_` metrics.
+
+#### Python: KV event publishing (optional)
+
+Unified backends declare KV event sources; the framework constructs and owns
+the `KvEventPublisher` instances. Do not instantiate `KvEventPublisher`
+directly from a unified `LLMEngine`. Instead, implement
+`kv_event_sources()` and return one source for each data-parallel rank hosted
+by the worker.
+
+Rust backends use the equivalent `LLMEngine::kv_event_sources()` trait method;
+see [Rust Step 4](#rust-step-4-implement-the-llmengine-trait) and the
+[`LLMEngine` trait](../../lib/backend-common/src/engine.rs).
+
+Use `ZmqSource` when the engine already emits Dynamo-compatible KV events on a
+ZMQ socket, as vLLM and SGLang do:
+
+```python
+from dynamo.common.backend.publisher import ZmqSource
+
+async def kv_event_sources(self):
+    return [
+        ZmqSource(endpoint="tcp://127.0.0.1:5557", dp_rank=0),
+        ZmqSource(endpoint="tcp://127.0.0.1:5558", dp_rank=1),
+    ]
+```
+
+Use `PushSource` when the engine needs a live publisher object and drives
+`publish_stored()` / `publish_removed()` from its own event thread. The in-tree
+TRT-LLM backend is the reference implementation for this path:
+
+```python
+from dynamo.common.backend.publisher import PushSource
+
+def _on_kv_publisher_ready(self, publisher):
+    self._kv_publisher = publisher
+    self._start_kv_event_thread()
+
+async def kv_event_sources(self):
+    return [PushSource(on_ready=self._on_kv_publisher_ready, dp_rank=0)]
+```
+
+KV event publishers require `EngineConfig.llm.kv_cache_block_size`. If the
+engine declares sources but does not return a block size, `Worker` skips KV
+event publishers because the router cannot map token IDs to cache blocks.
+`WorkerConfig.enable_kv_routing=False` is the operator-level kill switch; when
+it is disabled, the worker does not call `kv_event_sources()`.
+
+Keep rank ownership stable for the engine lifetime. DP-capable engines should
+also advertise the same rank shape in `EngineConfig.llm.data_parallel_size` and
+`data_parallel_start_rank` so router-forced `dp_rank` values line up with the
+published event streams.
+
+`PushSource` engines own cleanup of their event producer. Stop publisher
+threads or tasks in `cleanup()` before returning, and do not publish after
+cleanup begins.
 
 ### Python Step 5: Write `main.py`
 
@@ -981,7 +1092,7 @@ inside `dynamo-runtime`:
 
    ```toml
    [toolchain]
-   channel = "1.93.1"
+   channel = "1.96.1"
    ```
 
    Older toolchains fail with `feature edition2024 is required`.
