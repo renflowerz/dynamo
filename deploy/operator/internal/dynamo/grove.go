@@ -93,12 +93,14 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 
 		if usesPCSG {
 			ok, reason, componentStatus := CheckPCSGReady(ctx, client, resourceName, dgd.Namespace, logger)
+			componentStatus.RuntimeNamespace = dgd.GetDynamoNamespaceForComponent(component)
 			componentStatuses[componentName] = componentStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("pcsg/%s: %s", resourceName, reason))
 			}
 		} else {
 			ok, reason, componentStatus := CheckPodCliqueReady(ctx, client, resourceName, dgd.Namespace, logger)
+			componentStatus.RuntimeNamespace = dgd.GetDynamoNamespaceForComponent(component)
 			componentStatuses[componentName] = componentStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("podclique/%s: %s", resourceName, reason))

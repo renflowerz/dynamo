@@ -56,6 +56,9 @@ logger = logging.getLogger(__name__)
 CURRENT_WORKER_HASH_ANNOTATION = "nvidia.com/current-worker-hash"
 CURRENT_WORKER_HASH_V2_ANNOTATION = "nvidia.com/current-worker-hash-v2"
 LEGACY_WORKER_HASH = "legacy"
+WORKER_COMPONENT_TYPES = {"worker", "prefill", "decode"}
+GROVE_COMPONENT_KINDS = {"PodClique", "PodCliqueScalingGroup"}
+WORKER_SUFFIX_COMPONENT_KINDS = {"Deployment", "LeaderWorkerSet"}
 
 
 class KubernetesConnector(PlannerConnector):
@@ -91,19 +94,57 @@ class KubernetesConnector(PlannerConnector):
     def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
         """Return the Dynamo namespace used by the current worker generation.
 
-        Managed DGD rolling updates run worker components in
-        ``<base_namespace>-<worker_hash>`` while non-worker components, including
-        the frontend metrics labels, stay on ``base_namespace``.  The active hash
-        is stored on the parent DGD so planners can discover it dynamically.
+        Newer operators publish the effective runtime namespace on the worker
+        component status. Older operators expose only the active worker hash, so
+        the planner falls back to appending that hash only for non-Grove worker
+        resource kinds.
         """
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        worker_status = self._get_worker_component_status(deployment)
+        if worker_status:
+            runtime_namespace = worker_status.get("runtimeNamespace")
+            if runtime_namespace:
+                return runtime_namespace
+
+        worker_hash = self._get_current_worker_hash(deployment)
+        if not worker_hash:
+            return base_dynamo_namespace
+        if not self._worker_status_uses_namespace_suffix(worker_status):
+            return base_dynamo_namespace
+        return f"{base_dynamo_namespace}-{worker_hash}"
+
+    def _get_current_worker_hash(self, deployment: dict) -> Optional[str]:
         annotations = deployment.get("metadata", {}).get("annotations", {}) or {}
         worker_hash = annotations.get(CURRENT_WORKER_HASH_ANNOTATION)
         if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
             worker_hash = annotations.get(CURRENT_WORKER_HASH_V2_ANNOTATION)
         if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
-            return base_dynamo_namespace
-        return f"{base_dynamo_namespace}-{worker_hash}"
+            return None
+        return worker_hash
+
+    def _get_worker_component_status(self, deployment: dict) -> Optional[dict]:
+        status_components = deployment.get("status", {}).get("components", {}) or {}
+        components_by_name = get_components_by_name(deployment)
+        for component_name, component in components_by_name.items():
+            if (
+                get_component_type(component) not in WORKER_COMPONENT_TYPES
+                and component_name not in WORKER_COMPONENT_TYPES
+            ):
+                continue
+            worker_status = status_components.get(component_name)
+            if worker_status:
+                return worker_status
+        return None
+
+    def _worker_status_uses_namespace_suffix(
+        self, worker_status: Optional[dict]
+    ) -> bool:
+        if not worker_status:
+            return False
+        component_kind = worker_status.get("componentKind", "")
+        if component_kind in GROVE_COMPONENT_KINDS:
+            return False
+        return component_kind in WORKER_SUFFIX_COMPONENT_KINDS
 
     async def add_component(
         self, sub_component_type: SubComponentType, blocking: bool = True

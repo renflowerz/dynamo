@@ -1614,7 +1614,54 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 		}
 	}
 
+	r.setDGDComponentRuntimeNamespaces(dynamoDeployment, result.ComponentStatus)
+
 	return result, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) setDGDComponentRuntimeNamespaces(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentStatuses map[string]nvidiacomv1beta1.ComponentReplicaStatus,
+) {
+	if dgd == nil || len(componentStatuses) == 0 {
+		return
+	}
+
+	for componentName, componentStatus := range componentStatuses {
+		component := dgd.GetComponentByName(componentName)
+		if component == nil {
+			continue
+		}
+
+		baseNamespace := dgd.GetDynamoNamespaceForComponent(component)
+		workerHashSuffix := ""
+		if dgdComponentKindUsesWorkerRuntimeSuffix(componentStatus.ComponentKind) {
+			workerHashSuffix = r.currentRuntimeWorkerHash(dgd)
+		}
+
+		componentStatus.RuntimeNamespace = dynamo.ComponentRuntimeNamespace(
+			baseNamespace,
+			string(component.ComponentType),
+			workerHashSuffix,
+		)
+		componentStatuses[componentName] = componentStatus
+	}
+}
+
+func dgdComponentKindUsesWorkerRuntimeSuffix(kind nvidiacomv1beta1.ComponentKind) bool {
+	return kind == nvidiacomv1beta1.ComponentKindDeployment ||
+		kind == nvidiacomv1beta1.ComponentKindLeaderWorkerSet
+}
+
+func (r *DynamoGraphDeploymentReconciler) currentRuntimeWorkerHash(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
+	current := r.currentWorkerHashes(dgd)
+	if current.v1 != "" && current.v1 != consts.LegacyWorkerHash {
+		return current.v1
+	}
+	if current.v2 != "" && current.v2 != consts.LegacyWorkerHash {
+		return current.v2
+	}
+	return ""
 }
 
 func applyDCDCheckpointStartupPolicy(

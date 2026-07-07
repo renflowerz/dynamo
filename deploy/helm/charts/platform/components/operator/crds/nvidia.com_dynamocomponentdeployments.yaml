@@ -11655,6 +11655,12 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
+                    runtimeNamespace:
+                      description: |-
+                        RuntimeNamespace is the effective Dynamo runtime namespace for this
+                        service. Worker-class services may include a worker generation suffix;
+                        non-worker services and Grove-backed workers use the base namespace.
+                      type: string
                     updatedReplicas:
                       description: |-
                         UpdatedReplicas is the number of replicas at the current/desired revision.
@@ -20491,6 +20497,12 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
+                    runtimeNamespace:
+                      description: |-
+                        runtimeNamespace is the effective Dynamo runtime namespace for this
+                        component. Worker-class components may include a worker generation suffix;
+                        non-worker components and Grove-backed workers use the base namespace.
+                      type: string
                     updatedReplicas:
                       description: updatedReplicas is the number of replicas at the current/desired revision.
                       format: int32

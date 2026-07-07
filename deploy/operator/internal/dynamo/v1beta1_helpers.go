@@ -257,6 +257,34 @@ func GetDCDDynamoNamespace(dcd *v1beta1.DynamoComponentDeployment) string {
 	return v1beta1.ComputeDynamoNamespace(dcd.Spec.GlobalDynamoNamespace, dcd.GetNamespace(), parentName)
 }
 
+// ComponentRuntimeNamespace returns the effective Dynamo runtime namespace for a
+// component. Worker-class components append their concrete worker hash suffix;
+// non-workers and legacy worker generations use the base Dynamo namespace.
+func ComponentRuntimeNamespace(dynamoNamespace string, componentType string, workerHashSuffix string) string {
+	if dynamoNamespace == "" {
+		return ""
+	}
+	if IsWorkerComponent(componentType) && workerHashSuffix != "" && workerHashSuffix != commonconsts.LegacyWorkerHash {
+		return dynamoNamespace + "-" + workerHashSuffix
+	}
+	return dynamoNamespace
+}
+
+// GetDCDRuntimeNamespace returns the effective Dynamo runtime namespace used by
+// pods generated for this DCD. It reads the worker hash from the pod template
+// labels, which are the source used to inject DYN_NAMESPACE_WORKER_SUFFIX.
+func GetDCDRuntimeNamespace(dcd *v1beta1.DynamoComponentDeployment) string {
+	if dcd == nil {
+		return ""
+	}
+	labels := GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	return ComponentRuntimeNamespace(
+		GetDCDDynamoNamespace(dcd),
+		string(dcd.Spec.ComponentType),
+		labels[commonconsts.KubeLabelDynamoWorkerHash],
+	)
+}
+
 // GetDCDSubComponentType returns the alpha subcomponent type restored by API
 // conversion, when one was preserved.
 func GetDCDSubComponentType(dcd *v1beta1.DynamoComponentDeployment) string {
