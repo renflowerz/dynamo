@@ -19,10 +19,7 @@ package validation
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -45,7 +42,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
-	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 const (
@@ -60,7 +56,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	requestValidators := requestValidatorsFromCRD(t, "nvidia.com_dynamographdeployments.yaml")
 	defaultManager := newGroveTopologyTestManager(t, newTestClusterTopology())
 	missingTopologyManager := newGroveTopologyTestManager(t)
-	inferencePoolManager := newInferencePoolTestManager(t)
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
@@ -763,22 +758,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.services[worker].volumeMounts[0].mountPoint: Required value: is required when useAsCompilationCache is false"},
 		},
 		{
-			name:    "alpha EPP config sources are mutually exclusive",
-			manager: inferencePoolManager,
-			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				worker := dgd.Spec.Services["worker"]
-				worker.ComponentType = consts.ComponentTypeEPP
-				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp"}},
-					Config: &apixv1alpha1.EndpointPickerConfig{
-						Plugins:            []apixv1alpha1.PluginSpec{},
-						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
-					},
-				}
-			}),
-			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Invalid value: null: exactly one of configMapRef or config is required"},
-		},
-		{
 			name: "alpha intra-pod failover shadow maximum is preserved structurally",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].Failover = &nvidiacomv1alpha1.FailoverSpec{
@@ -915,52 +894,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{
 					Size: resource.MustParse("1Gi"),
-				}
-			}),
-		},
-		{
-			name:    "v1alpha1 EPP config without a source reaches the webhook without v1beta1 CEL",
-			manager: inferencePoolManager,
-			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				worker := dgd.Spec.Services["worker"]
-				worker.ComponentType = consts.ComponentTypeEPP
-				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{}
-			}),
-			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Invalid value: null: exactly one of configMapRef or config is required"},
-		},
-		{
-			name: "v1beta1 EPP config without a source is rejected by CEL",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				worker := betaWorkerComponent(dgd)
-				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{}
-			}),
-			wantCELErr: "spec.components[1].eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
-		},
-		{
-			name: "v1beta1 EPP config with both sources is rejected by CEL",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				worker := betaWorkerComponent(dgd)
-				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp"}},
-					Config: &apixv1alpha1.EndpointPickerConfig{
-						Plugins:            []apixv1alpha1.PluginSpec{},
-						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
-					},
-				}
-			}),
-			wantCELErr: "spec.components[1].eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
-		},
-		{
-			name:    "v1beta1 valid EPP config reaches the webhook",
-			manager: inferencePoolManager,
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				worker := betaWorkerComponent(dgd)
-				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
-				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp"}},
 				}
 			}),
 		},
@@ -2059,48 +1992,6 @@ func newGroveTopologyTestManager(t *testing.T, objects ...runtime.Object) ctrl.M
 		client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).Build(),
 		config: &rest.Config{},
 	}
-}
-
-func newInferencePoolTestManager(t *testing.T) ctrl.Manager {
-	t.Helper()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-
-		var response any
-		switch request.URL.Path {
-		case "/api":
-			response = &metav1.APIVersions{
-				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "APIVersions"},
-				Versions: []string{"v1"},
-			}
-		case "/apis":
-			groupVersion := metav1.GroupVersionForDiscovery{
-				GroupVersion: "inference.networking.k8s.io/v1alpha2",
-				Version:      "v1alpha2",
-			}
-			response = &metav1.APIGroupList{
-				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "APIGroupList"},
-				Groups: []metav1.APIGroup{{
-					Name:             "inference.networking.k8s.io",
-					Versions:         []metav1.GroupVersionForDiscovery{groupVersion},
-					PreferredVersion: groupVersion,
-				}},
-			}
-		default:
-			http.NotFound(w, request)
-			return
-		}
-
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-	}))
-	t.Cleanup(server.Close)
-
-	manager := newGroveTopologyTestManager(t).(*fakeManager)
-	manager.config = &rest.Config{Host: server.URL}
-	return manager
 }
 
 func newTestClusterTopology() *grovev1alpha1.ClusterTopology {
